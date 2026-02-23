@@ -18,7 +18,7 @@ from types import FunctionType
 
 from tensordict import TensorDict
 
-from verl.protocol import DataProtoFuture, _padding_size_key
+from verl.protocol import DataProto, DataProtoFuture, _padding_size_key
 from verl.utils.py_functional import DynamicEnum
 from verl.utils.tensordict_utils import concat_tensordict
 from verl.utils.transferqueue_utils import BatchMeta
@@ -72,20 +72,88 @@ init_predefined_dispatch_mode()
 init_predefined_execute_mode()
 
 
+def _chunk_data_proto_group_aligned(data: DataProto, chunks: int):
+    """
+    Split DataProto into chunks while keeping same-group items on the same chunk.
+    Grouping is controlled via `meta_info["dp_group_key"]`.
+    """
+    group_key = data.meta_info.get("dp_group_key")
+    if not group_key:
+        return data.chunk(chunks=chunks)
+
+    group_values = data.non_tensor_batch.get(group_key)
+    if group_values is None:
+        return data.chunk(chunks=chunks)
+
+    group_size = data.meta_info.get("dp_group_size")
+    strict = bool(data.meta_info.get("dp_group_strict", True))
+
+    group_to_indices: dict[object, list[int]] = {}
+    group_order: list[object] = []
+    for idx, group_val in enumerate(list(group_values)):
+        if group_val not in group_to_indices:
+            group_to_indices[group_val] = []
+            group_order.append(group_val)
+        group_to_indices[group_val].append(idx)
+
+    if group_size is not None:
+        for group_val, idxs in group_to_indices.items():
+            if len(idxs) != group_size:
+                if strict:
+                    raise ValueError(
+                        f"dp_group_key={group_key} expects group size {group_size}, "
+                        f"but group {group_val} has {len(idxs)} items"
+                    )
+                return data.chunk(chunks=chunks)
+
+    num_groups = len(group_order)
+    if num_groups % chunks != 0:
+        if strict:
+            raise ValueError(
+                f"dp_group_key={group_key} expects num_groups % chunks == 0, "
+                f"but got num_groups={num_groups} chunks={chunks}"
+            )
+        return data.chunk(chunks=chunks)
+
+    groups_per_chunk = num_groups // chunks
+    chunked = []
+    for chunk_id in range(chunks):
+        start = chunk_id * groups_per_chunk
+        end = start + groups_per_chunk
+        indices = []
+        for group_val in group_order[start:end]:
+            indices.extend(group_to_indices[group_val])
+        chunked.append(data.select_idxs(indices))
+
+    chunk_size = len(chunked[0]) if chunked else 0
+    if strict and any(len(part) != chunk_size for part in chunked):
+        raise ValueError(
+            f"dp_group_key={group_key} produced uneven chunk sizes: "
+            f"{[len(part) for part in chunked]}"
+        )
+    return chunked
+
+
 def _split_args_kwargs_data_proto(chunks, *args, **kwargs):
     from verl.protocol import DataProto, DataProtoFuture
 
     splitted_args = []
     for arg in args:
         assert isinstance(arg, DataProto | DataProtoFuture | BatchMeta | TensorDict)
-        chunked_arg = arg.chunk(chunks=chunks)
+        if isinstance(arg, DataProto):
+            chunked_arg = _chunk_data_proto_group_aligned(arg, chunks)
+        else:
+            chunked_arg = arg.chunk(chunks=chunks)
         assert len(chunked_arg) == chunks
         splitted_args.append(chunked_arg)
 
     splitted_kwargs = {}
     for key, val in kwargs.items():
         assert isinstance(val, DataProto | DataProtoFuture | BatchMeta | TensorDict)
-        chunked_kwarg = val.chunk(chunks=chunks)
+        if isinstance(val, DataProto):
+            chunked_kwarg = _chunk_data_proto_group_aligned(val, chunks)
+        else:
+            chunked_kwarg = val.chunk(chunks=chunks)
         assert len(chunked_kwarg) == chunks
         splitted_kwargs[key] = chunked_kwarg
 

@@ -552,6 +552,10 @@ class AgentLoopWorkerBase:
             output.reward_score = result["reward_score"]
             output.extra_fields["reward_extra_info"] = result["reward_extra_info"]
 
+        # Added so OPOB baselining can access scalar rewards later in trainer.
+        if output.reward_score is not None:
+            output.extra_fields["reward_scalar"] = output.reward_score
+
         return _InternalAgentLoopOutput(
             prompt_ids=prompt_output["input_ids"],
             response_ids=response_output["input_ids"],

@@ -44,7 +44,24 @@ def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
         >>> reduce_metrics(metrics)
         {"loss": 2.0, "accuracy": 0.8, "max_reward": 8.0, "min_error": 0.05}
     """
+    structured_keys = {
+        "staleness/ess",
+        "actor/minibatch_grad_info",
+        "actor/local_traj_records",
+    }
+
     for key, val in metrics.items():
+        if key in structured_keys:
+            # Structured metrics from per-traj actor updates can be returned as
+            # list[dict] or list[list[dict]] across workers; flatten for logging.
+            out = []
+            for item in val:
+                if isinstance(item, list):
+                    out.extend(item)
+                elif isinstance(item, dict):
+                    out.append(item)
+            metrics[key] = out
+            continue
         if "max" in key:
             metrics[key] = np.max(val)
         elif "min" in key:

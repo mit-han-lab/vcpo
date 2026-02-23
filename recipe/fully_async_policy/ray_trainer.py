@@ -372,7 +372,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 return batch
 
             async_training = self.config.get("async_training", None)
-            if async_training and async_training.use_rollout_log_probs:
+            skip_recompute_old_log_prob = bool(
+                getattr(async_training, "skip_recompute_old_log_prob", False)
+            ) if async_training is not None else False
+            batch.meta_info["skip_recompute_old_log_prob"] = skip_recompute_old_log_prob
+
+            if skip_recompute_old_log_prob:
+                print("[RayTrainer] Skipping old_log_prob recomputation")
+                assert "rollout_log_probs" in batch.batch.keys()
+                batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+            elif async_training and async_training.use_rollout_log_probs:
                 # If local_triger_step == 1, load the training engine's parameters to the CPU
                 #  and save a copy for subsequent MIS use.
                 # If local_trigger_step == 2, 3, ..., restore the parameters of version 1 to calculate the old_log_prob,
@@ -433,7 +442,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 
             rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
-            if rollout_corr_config is not None and "rollout_log_probs" in batch.batch:
+            if skip_recompute_old_log_prob:
+                batch.meta_info["rollout_corr_config"] = rollout_corr_config
+                print("[RayTrainer] Deferring rollout correction to backward pass")
+            elif rollout_corr_config is not None and "rollout_log_probs" in batch.batch:
                 batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
                 # IS and off-policy metrics already have rollout_corr/ prefix
                 metrics.update(is_metrics)

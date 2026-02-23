@@ -323,9 +323,10 @@ def compute_grpo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
+        adv_scalars = scores.detach().clone().numpy()
         scores = scores.unsqueeze(-1) * response_mask
 
-    return scores, scores
+    return scores, scores, adv_scalars
 
 
 @register_adv_est(AdvantageEstimator.GRPO_VECTORIZED)
