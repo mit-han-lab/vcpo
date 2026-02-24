@@ -591,6 +591,15 @@ class RayPPOTrainer:
             if not self.async_rollout_mode:
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
+                rollout_config = self.config.actor_rollout_ref.rollout
+                if (
+                    rollout_config.mode == "async"
+                    and rollout_config.multi_turn.get("enable", False)
+                    and "agent_name" not in test_gen_batch_padded.non_tensor_batch
+                ):
+                    test_gen_batch_padded.non_tensor_batch["agent_name"] = np.array(
+                        ["async_partial_tool_agent"] * len(test_gen_batch_padded), dtype=object
+                    )
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
             # unpad
