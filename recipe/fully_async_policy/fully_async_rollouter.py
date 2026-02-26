@@ -126,6 +126,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
         self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        self.bsz_per_dp_rank = int(config.async_training.get("bsz_per_dp_rank", 16))
+        assert self.bsz_per_dp_rank > 0, "async_training.bsz_per_dp_rank must be positive"
         self.max_required_samples = None
         self.max_concurrent_samples = None
         # queue size
@@ -183,7 +185,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
             )
 
-            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * 16
+            self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * self.bsz_per_dp_rank
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
             self.max_queue_size = self.max_required_samples
 
