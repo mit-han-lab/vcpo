@@ -340,13 +340,18 @@ class AgentLoopWorkerBase:
         )
 
         # override sampling params for validation
-        if batch.meta_info.get("validate", False):
+        validate = batch.meta_info.get("validate", False)
+        if validate:
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["temperature"] = config.val_kwargs.temperature
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
-            default_agent_loop = config.agent.default_agent_loop
+            # Enable tool use loop for validation in async trainer if enabled
+            if validate and config.mode == "async" and config.multi_turn.get("enable", False):
+                default_agent_loop = "async_partial_tool_agent"
+            else:
+                default_agent_loop = config.agent.default_agent_loop
             batch.non_tensor_batch["agent_name"] = np.array([default_agent_loop] * len(batch), dtype=object)
 
         if "index" in batch.non_tensor_batch:
@@ -378,6 +383,7 @@ class AgentLoopWorkerBase:
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
             kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            kwargs["validate"] = validate
             tasks.append(
                 asyncio.create_task(
                     self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
