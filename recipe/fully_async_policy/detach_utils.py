@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import time
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -22,6 +23,7 @@ import torch
 from verl import DataProto
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
 from verl.trainer.ppo.ray_trainer import compute_response_mask
+from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 
 
 @dataclass
@@ -55,6 +57,30 @@ class ValidateMetrics:
     metrics: Optional[dict[str, Any]] = None
     global_steps: Optional[int] = None
     param_version: Optional[int] = None
+
+
+def resolve_resume_path(config):
+    """Resolve checkpoint path from trainer resume config."""
+    if config.trainer.resume_mode == "disable":
+        return None
+
+    if config.trainer.default_hdfs_dir is not None:
+        raise NotImplementedError("[ASYNC MAIN] Load from hdfs is not implemented yet")
+
+    checkpoint_folder = config.trainer.default_local_dir
+    if not os.path.isabs(checkpoint_folder):
+        working_dir = os.getcwd()
+        checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
+
+    if config.trainer.resume_mode == "auto":
+        return find_latest_ckpt_path(checkpoint_folder)
+    if config.trainer.resume_mode == "resume_path":
+        resume_path = config.trainer.resume_from_path
+        if not os.path.isabs(resume_path):
+            working_dir = os.getcwd()
+            resume_path = os.path.join(working_dir, resume_path)
+        return resume_path
+    raise ValueError(f"[ASYNC MAIN] Unknown resume_mode: {config.trainer.resume_mode}")
 
 
 def prepare_single_generation_data(batch_dict, config) -> DataProto:
@@ -361,7 +387,7 @@ def process_structured_metrics(structured_metrics: dict[str, list], allow_media:
                             rollout_probs.append(float(np.exp(float(rollout_lp))))
 
             if old_probs and rollout_probs:
-                fig, ax = plt.subplots(figsize=(6, 4))
+                fig, ax = plt.subplots(figsize=(4, 4))
                 ax.scatter(old_probs, rollout_probs, s=8, alpha=0.4)
                 ax.set_xlabel("old/policy probs")
                 ax.set_ylabel("rollout probs")

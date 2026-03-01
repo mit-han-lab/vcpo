@@ -158,6 +158,10 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.active_tasks = set()
         self.cancel_queue = asyncio.Queue()
 
+        # For checkpointing queue state
+        self.checkpointing = False
+        self.queue_lock = asyncio.Lock()
+
     def _init_async_objects(self):
         # Initialize asyncio synchronization primitives.
         # We let asyncio.Condition create the Lock internally to ensure they share the same Event Loop.
@@ -256,7 +260,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         # samples when resuming training.
         # TODO: Implement dataloader recovery without losing in-flight samples.
         from verl.utils.fs import local_mkdir_safe
-
         # save dataloader
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
@@ -264,6 +267,36 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
         print(f"[FullyAsyncRollouter] Saved dataloader checkpoint to {dataloader_local_path}")
+        if self.config.async_training.get("save_queue_state", True):
+            print("[FullyAsyncRollouter] Pausing rollout to save queue state...")
+            async with self.lock:
+                self.checkpointing = True
+                self.condition.notify_all()
+            await self.pause()
+
+            try:
+                queue_state = await self._snapshot_internal_queues()
+                queue_state.update(
+                    {
+                        "global_steps": self.global_steps,
+                        "staleness_samples": self.staleness_samples,
+                        "total_generated_samples": self.total_generated_samples,
+                        "dropped_stale_samples": self.dropped_stale_samples,
+                        "processed_sample_count": self.processed_sample_count,
+                        "current_param_version": self.current_param_version,
+                    }
+                )
+
+                queue_local_path = os.path.join(local_global_step_folder, "rollout_queue.pt")
+                torch.save(queue_state, queue_local_path)
+                print(f"[FullyAsyncRollouter] Saved rollout queue state to {queue_local_path}")
+
+                if self.message_queue_client is not None:
+                    await self.message_queue_client.save_state(local_global_step_folder)
+            finally:
+                async with self.lock:
+                    self.checkpointing = False
+                await self.resume()
 
     def load_checkpoint(self):
         """Load checkpoint including dataloader state based on resume mode"""
@@ -322,6 +355,45 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 f"[FullyAsyncRollouter] Warning: No dataloader state found at {dataloader_local_path}, "
                 f"will start from scratch"
             )
+
+        if self.config.async_training.get("save_queue_state", True):
+            queue_local_path = os.path.join(global_step_folder, "rollout_queue.pt")
+            if os.path.exists(queue_local_path):
+                queue_state = torch.load(queue_local_path, weights_only=False)
+                self._restore_internal_queues_sync(queue_state)
+                self.global_steps = int(queue_state.get("global_steps", self.global_steps))
+                self.staleness_samples = int(queue_state.get("staleness_samples", self.staleness_samples))
+                self.total_generated_samples = int(queue_state.get("total_generated_samples", self.total_generated_samples))
+                self.dropped_stale_samples = int(queue_state.get("dropped_stale_samples", self.dropped_stale_samples))
+                self.processed_sample_count = int(queue_state.get("processed_sample_count", self.processed_sample_count))
+                self.current_param_version = int(queue_state.get("current_param_version", self.current_param_version))
+                print(f"[FullyAsyncRollouter] Loaded rollout queue state from {queue_local_path}")
+            else:
+                print(f"[FullyAsyncRollouter] WARNING: No rollout queue state found at {queue_local_path}, skipping load")
+
+    async def _snapshot_internal_queues(self):
+        async with self.queue_lock:
+            return {
+                "pending_queue": list(self.pending_queue._queue),
+                "pending_queue_maxsize": self.pending_queue.maxsize,
+                "cancel_queue": list(self.cancel_queue._queue),
+                "cancel_queue_maxsize": self.cancel_queue.maxsize,
+            }
+
+    def _restore_internal_queues_sync(self, state: dict) -> None:
+        pending_maxsize = int(state.get("pending_queue_maxsize", 128))
+        self.pending_queue = asyncio.Queue(maxsize=pending_maxsize)
+        for item in state.get("pending_queue", []):
+            self.pending_queue.put_nowait(item)
+
+        cancel_maxsize = int(state.get("cancel_queue_maxsize", 0))
+        self.cancel_queue = asyncio.Queue(maxsize=cancel_maxsize) if cancel_maxsize > 0 else asyncio.Queue()
+        for item in state.get("cancel_queue", []):
+            self.cancel_queue.put_nowait(item)
+
+    async def _restore_internal_queues(self, state: dict) -> None:
+        async with self.queue_lock:
+            self._restore_internal_queues_sync(state)
 
     def _validate_config(self):
         # Validate asynchronous training configuration
@@ -384,6 +456,10 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         continuous_iterator = self._create_continuous_iterator()
 
         for epoch, batch_dict in continuous_iterator:
+            async with self.lock:
+                while self.paused or self.checkpointing:
+                    await self.condition.wait()
+
             # Similar to _prepare_generate_batch: Separate data
             full_batch = prepare_single_generation_data(batch_dict, self.config)
 
