@@ -1,6 +1,6 @@
 <div align="center">
 
-# VCPO: Variance Controlled Policy Optimization for Stable Asynchronous RL
+# Stable Asynchrony: Variance-Controlled Off-Policy RL for LLMs
 
 [![Paper](https://img.shields.io/badge/paper-A42C25?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2602.17616)
 [![Github](https://img.shields.io/badge/VCPO-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/mit-han-lab/vcpo)
@@ -22,17 +22,17 @@
 
 ## Overview
 
-We introduce Variance Controlled Off-Policy Optimization (VCPO), a framework that adds explicit variance-targeted controls for off-policy RL, enabling stable and scalable Async RL training.
+We introduce Variance Controlled Off-Policy Optimization (VCPO), a framework that adds explicit variance-targeted controls for policy-gradient methods in the off-policy setting, enabling stable and scalable Async RL training.
 
 - ✨ Seamlessly integrates into common policy-gradient methods like REINFORCE/RLOO/GRPO
-- 🚀 2.5x faster Async RL training while matching synchronous RL performance
-- 🧠 Robust training stability under high off-policy settings (at least 128 steps off-policy)
+- 🚀 **2.5x** faster Async RL training while matching synchronous RL performance
+- 🧠 Robust training stability under high off-policy settings (**at least k=128** steps off-policy)
 
-Async RL pipelines rollout generation with learning promises to achieve significant reductions in end-to-end training time. But achieving these speedups requires highly off-policy training, which often leads to collapse
+Async RL pipelines rollout generation with learning, significantly reducing end-to-end training time. But large speedups typically require high policy lag that can cause collapse.
 
-Why? Highly stale rollouts make importance sampling ratios heavy-tailed, so a few trajectories dominate each update and the policy-gradient estimator becomes high-variance. Previous work try masking/clipping/whitening IS ratios, algorithmic changes, and system-side changes. These can delay collapse… but still fail at high asynchrony.
+Why? Highly stale rollouts make importance sampling ratios heavy-tailed, so a few trajectories dominate each update and the policy-gradient estimator becomes high-variance. Previous work have tried masking/clipping/whitening IS ratios, algorithmic changes, and system-side changes. These can delay collapse… but still fail at high asynchrony.
 
-To address, VCPO introduces two techniques to stabilize policy-gradient methods for asynchronous RL training:
+To address this, VCPO introduces two techniques to stabilize policy-gradient methods for asynchronous RL training:
 
 1. **ESS-guided step scaling** to dampen unreliable updates, following sqrt scaling for AdamW-style optimizers.
 
@@ -43,27 +43,27 @@ $$
 $$
 
 
-2. **Closed-form off-policy optimal baseline (OPOB)** using gradient norm and importance ratios (no learned critic):
+2. **Closed-form off-policy optimal baseline (OPOB)** using gradient norm and importance ratios (no learned critic), , implemented with minimal overhead and compatible with DPxTPxSP:
 
 $$
 b_{\text{OPOB}}^\star=\frac{\sum_{i=1}^N w_i^2 \|\nabla_\theta \log \pi_\theta(\tau_i)\|^2 R_i}{\sum_{i=1}^N w_i^2 \|\nabla_\theta \log \pi_\theta(\tau_i)\|^2}
 $$
 
 ## Results
-
-Across math/general reasoning/tool use tasks and model sizes from 1.5B to 7B, VCPO enables stable training where prior methods fail. In long-context multi-turn RL, this delivers a **2.5x** end-to-end speedup while matching synchronous performance.
+We use `k` to denote the maximum sampler–learner policy lag (i.e., `k` steps off-policy), following the PipelineRL setting. Across math, general reasoning, and tool-use tasks with model sizes from 1.5B to 7B, VCPO enables stable asynchronous training where prior stabilizers fail. In long-context multi-turn RL, VCPO delivers a **2.5×** end-to-end speedup while matching synchronous performance.
 
 <p align="center">
   <img src="figures/vcpo_results.png" width="85%" />
 </p>
 
-End-to-end training times and validation accuracy for synchronous vs. asynchronous training (lag `k`).
+**End-to-end** training time vs. validation accuracy for synchronous (`k=0`) and asynchronous training (lag `k`).  
+Here, **Steps** denotes gradient update steps, and **GPU hours ↓** measures total wall-clock time across sampling + training GPUs
 
 #### Countdown
 
 <div align="center">
 
-| Method | Countdown ↑ | Steps | GPU hours ↓ |
+| Method | Countdown Acc ↑ | Steps | GPU hours ↓ |
 | --- | ---: | ---: | ---: |
 | Base | 1.6% | -- | -- |
 | Sync (`k=0`) | 38.4% | 400 | 143.2 |
@@ -75,7 +75,7 @@ End-to-end training times and validation accuracy for synchronous vs. asynchrono
 
 <div align="center">
 
-| Method | MATH-500 ↑ | Steps | GPU hours ↓ |
+| Method | MATH-500 Acc ↑ | Steps | GPU hours ↓ |
 | --- | ---: | ---: | ---: |
 | Base | 40.2% | -- | -- |
 | Sync (`k=0`) | 72.0% | 400 | 134.4 |
@@ -87,15 +87,13 @@ End-to-end training times and validation accuracy for synchronous vs. asynchrono
 
 <div align="center">
 
-| Method | AIME 2025 ↑ | Steps | GPU hours ↓ |
+| Method | AIME 2025 Acc ↑ | Steps | GPU hours ↓ |
 | --- | ---: | ---: | ---: |
 | Base | 5.3% | -- | -- |
 | Sync (`k=0`) | 26.7% | 300 | 420.2 |
 | VCPO + Async (`k=2`) | **27.8%** | 220 | **168.9** |
 
 </div>
-
-
 
 Async RL already achieves its full speedups at <10-steps off-policy, but we stress-tested far beyond that and found VCPO remains stable up to at least **128 steps off-policy**.
 
@@ -166,11 +164,14 @@ If you find this work useful, please consider citing:
 
 ```bibtex
 @article{huang2026stable,
-  title = {Stable Asynchrony: Variance-Controlled Off-Policy RL for LLMs},
-  author = {Luke J. Huang and Zhuoyang Zhang and Qinghao Hu and Shang Yang and Song Han},
-  year = {2026},
-  month = {Feb},
-  url = {https://arxiv.org/abs/2602.17616}
+  title        = {Stable Asynchrony: Variance-Controlled Off-Policy RL for LLMs},
+  author       = {Luke J. Huang and Zhuoyang Zhang and Qinghao Hu and Shang Yang and Song Han},
+  year         = {2026},
+  month         = feb,
+  eprint       = {2602.17616},
+  archivePrefix= {arXiv},
+  primaryClass = {cs.LG},
+  url          = {https://arxiv.org/abs/2602.17616}
 }
 ```
 
