@@ -51,6 +51,9 @@ def default_compute_score(
         "HuggingFaceH4/MATH-500",
         "math-500",
         "deepscaler",
+        "test-math-aime24",
+        "test-math-aime25",
+        "dapo_filter",
     ]:
         from . import math_reward
 
@@ -66,6 +69,9 @@ def default_compute_score(
         from . import math_dapo
 
         res = math_dapo.compute_score(solution_str, ground_truth)
+    elif data_source in ["countdown"]:
+        from . import countdown
+        res = countdown.compute_score(solution_str, ground_truth, extra_info=extra_info)
     elif data_source in [
         "numina_aops_forum",
         "numina_synthetic_math",
