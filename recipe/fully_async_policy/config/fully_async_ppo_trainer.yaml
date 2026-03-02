@@ -30,6 +30,9 @@ async_training:
   # compute_prox_log_prob
   compute_prox_log_prob: False
 
+  # save partial rollouts and completed rollouts in the replay buffer queue
+  save_queue_state: True
+
 # Rollout config
 rollout:
 

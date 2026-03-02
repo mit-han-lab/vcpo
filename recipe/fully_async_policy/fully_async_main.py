@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 from recipe.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from recipe.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
 from recipe.fully_async_policy.message_queue import MessageQueue, MessageQueueClient
+from recipe.fully_async_policy.detach_utils import resolve_resume_path
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role
 from verl.utils.fs import copy_to_local
@@ -186,6 +187,12 @@ class FullyAsyncTaskRunner:
 
         ray.get(self.components["rollouter"].set_message_queue_client.remote(self.components["message_queue_client"]))
         ray.get(self.components["trainer"].set_message_queue_client.remote(self.components["message_queue_client"]))
+
+        if config.async_training.get("save_queue_state", True):
+            resume_path = resolve_resume_path(config)
+            if resume_path is not None:
+                print(f"[ASYNC MAIN] Loading Message Queue checkpoint at {resume_path=}")
+                ray.get(self.components["message_queue"].load_state.remote(resume_path))
 
         print("[ASYNC MAIN] Setting up parameter synchronization...")
         from recipe.fully_async_policy.param_sync import ParameterSynchronizer

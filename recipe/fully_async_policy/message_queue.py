@@ -14,10 +14,12 @@
 
 import asyncio
 import logging
+import os
 from collections import deque
 from typing import Any
 
 import ray
+import torch
 from omegaconf import DictConfig
 
 logger = logging.getLogger(__name__)
@@ -198,6 +200,59 @@ class MessageQueue:
             else:
                 return None
 
+    async def save_state(self, ckpt_dir: str) -> None:
+        """Save message queue state to checkpoint directory."""
+        if not ckpt_dir:
+            raise ValueError("ckpt_dir cannot be empty")
+
+        async with self._lock:
+            # Filter out termination sentinels so checkpoints don't restore them.
+            queue_list = [x for x in self.queue if x is not None]
+            val_queue_list = [x for x in self.val_queue if x is not None]
+            state = {
+                "queue": queue_list,
+                "val_queue": val_queue_list,
+                "current_param_version": self.current_param_version,
+                "staleness_threshold": self.staleness_threshold,
+                "max_queue_size": self.max_queue_size,
+                "running": self.running,
+                "total_produced": self.total_produced,
+                "total_consumed": self.total_consumed,
+                "dropped_samples": self.dropped_samples,
+            }
+
+        os.makedirs(ckpt_dir, exist_ok=True)
+        path = os.path.join(ckpt_dir, "message_queue.pt")
+        torch.save(state, path)
+        print(f"[MessageQueue] Saved state to {path}")
+
+    async def load_state(self, ckpt_dir: str) -> None:
+        """Load message queue state from checkpoint directory."""
+        if not ckpt_dir:
+            raise ValueError("ckpt_dir cannot be empty")
+
+        path = os.path.join(ckpt_dir, "message_queue.pt")
+        if not os.path.exists(path):
+            print(f"[MessageQueue] WARNING: No state found at {path}, skipping load")
+            return
+
+        state = torch.load(path, weights_only=False)
+        async with self._lock:
+            self.max_queue_size = int(state.get("max_queue_size", self.max_queue_size))
+            # Ignore None sentinels
+            queue_list = [x for x in state.get("queue", []) if x is not None]
+            val_queue_list = [x for x in state.get("val_queue", []) if x is not None]
+            self.queue = deque(queue_list, maxlen=self.max_queue_size)
+            self.val_queue = deque(val_queue_list)
+            self.current_param_version = int(state.get("current_param_version", self.current_param_version))
+            self.staleness_threshold = state.get("staleness_threshold", self.staleness_threshold)
+            self.running = bool(state.get("running", self.running))
+            self.total_produced = int(state.get("total_produced", self.total_produced))
+            self.total_consumed = int(state.get("total_consumed", self.total_consumed))
+            self.dropped_samples = int(state.get("dropped_samples", self.dropped_samples))
+
+        print(f"[MessageQueue] Loaded state from {path}")
+
 
 class MessageQueueClient:
     """Asyncio-compatible MessageQueue client for communicating with MessageQueue Actor"""
@@ -247,6 +302,16 @@ class MessageQueueClient:
         future = self.queue_actor.get_memory_usage.remote()
         return await asyncio.wrap_future(future.future())
 
+    async def save_state(self, ckpt_dir: str) -> None:
+        """Save queue state (async)."""
+        future = self.queue_actor.save_state.remote(ckpt_dir)
+        await asyncio.wrap_future(future.future())
+
+    async def load_state(self, ckpt_dir: str) -> None:
+        """Load queue state (async)."""
+        future = self.queue_actor.load_state.remote(ckpt_dir)
+        await asyncio.wrap_future(future.future())
+
     # Synchronous version of the method (deprecated)
     def put_sample_sync(self, sample: Any, param_version: int) -> bool:
         """Put batch into queue (sync - deprecated, use put_sample instead)"""
@@ -263,3 +328,4 @@ class MessageQueueClient:
     def update_param_version_sync(self, version: int):
         """Update parameter version (async)"""
         return ray.get(self.queue_actor.update_param_version.remote(version))
+
