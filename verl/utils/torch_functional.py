@@ -259,8 +259,9 @@ def broadcast_dict_tensor(tensors: dict[str, torch.Tensor] | TensorDict, src, gr
     TODO: optimize this. Technically, we only need one broadcast
     """
 
-    for key in tensors.sorted_keys:
-        torch.distributed.broadcast(tensors[key], src=src, group=group, async_op=False)
+    with torch.no_grad():
+        for key in tensors.sorted_keys:
+            torch.distributed.broadcast(tensors[key], src=src, group=group, async_op=False)
 
 
 def allgather_dict_tensors(tensors: dict[str, torch.Tensor] | TensorDict, size, group, dim=0):
@@ -321,6 +322,36 @@ def allgather_dict_into_dict(data: dict, group=None) -> dict:
                 final_metrics[key] = []
             final_metrics[key].append(val)
     return final_metrics
+
+
+def allgather_dict_into_list(data: list[dict], group=None) -> list[dict]:
+    """All-gather a list of dicts and flatten.
+
+    Args:
+        data: a list of dictionaries on each rank
+        group: the process group to allgather
+
+    Returns:
+        A single flat list containing all dicts from all ranks (rank order).
+    """
+
+    if not (isinstance(data, list) and (len(data) == 0 or isinstance(data[0], dict))):
+        raise AssertionError(f"Expect data to be a list of dictionaries, Got {type(data)}")
+
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return list(data)
+
+    group_size = torch.distributed.get_world_size(group=group)
+
+    final_data = []
+    all_data_lst = [None for _ in range(group_size)]
+    torch.distributed.all_gather_object(all_data_lst, data, group=group)
+
+    for d in all_data_lst:
+        if d:
+            final_data.extend(d)
+
+    return final_data
 
 
 def split_dict_tensor_into_batches(tensors: TensorDict, batch_size) -> list[TensorDict]:

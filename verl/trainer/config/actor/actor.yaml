@@ -220,3 +220,51 @@ profiler:
 
       # Stack trace depth for memory allocations
       stack_depth: ${oc.select:global_profiler.global_tool_config.torch_memory.stack_depth,32}
+
+# Whether to use per-trajectory actor updates (Megatron VCPO path)
+update_policy_per_traj: false
+
+# Effective Sample Size based learning-rate scaling
+ess_scaling:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.ESSScalingConfig
+
+  # Whether to enable ESS based learning-rate scaling
+  enable: false
+
+  # Scaling rule for learning-rate multiplier: "sqrt" or "linear"
+  scaling_rule: sqrt
+
+  # Baseline ESS ratio used to compute LR multiplier
+  base_ess_ratio: 1.0
+
+  # Whether to use clipped ESS ratio instead of unclipped ESS ratio
+  use_clipped: false
+
+# Gradient baseline settings for VCPO per-trajectory updates
+grad_baselining:
+
+  # Target dataclass for this configuration
+  _target_: verl.workers.config.GradBaselineConfig
+
+  # Whether to enable gradient baseline correction
+  enable: false
+
+  # Baseline scope: "group" or "minibatch"
+  scope: group
+
+  # Baseline aggregation mode: "mean", "median", "winsorized_mean"
+  agg_mode: mean
+
+  # Whether to use importance-sampling weights in baseline computation
+  use_is_weights: true
+
+  # Whether to use clipped IS ratios in baseline computation
+  use_clipped_is_ratios: false
+
+  # Whether to normalize by sequence length when computing baseline
+  normalize_by_length: false
+
+  # Whether to normalize reward signal by reward std
+  norm_by_std: false

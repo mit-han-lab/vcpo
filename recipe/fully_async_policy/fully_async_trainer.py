@@ -17,7 +17,9 @@ import time
 from datetime import datetime
 from pprint import pprint
 from typing import Any
+from collections import defaultdict
 
+import numpy as np
 import ray
 from omegaconf import OmegaConf
 from tqdm import tqdm
@@ -26,6 +28,7 @@ from recipe.fully_async_policy.detach_utils import (
     MetricsAggregator,
     ValidateMetrics,
     assemble_batch_from_rollout_samples,
+    process_structured_metrics
 )
 from recipe.fully_async_policy.message_queue import MessageQueueClient
 from recipe.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
@@ -104,6 +107,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         self.progress_bar = None
         self.trigger_parameter_sync_step = config.async_training.trigger_parameter_sync_step
         self.last_ckpt_version = 0
+        self.structured_metrics: dict[str, list[Any]] = defaultdict(list)
 
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
@@ -188,6 +192,18 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
             batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
 
         batch.meta_info["fully_async/total_wait_time"] = total_wait_time
+        batch.meta_info["trainer_param_version"] = self.current_param_version
+        if "traj_uid" not in batch.non_tensor_batch and "uid" in batch.non_tensor_batch:
+            uids = batch.non_tensor_batch.get("uid")
+            batch.non_tensor_batch["traj_uid"] = np.array(
+                [f"group-{uid}_traj-{idx}" for idx, uid in enumerate(uids)],
+                dtype=object,
+            )
+            print(f"[FullyAsyncTrainer] Added trajectory UIDs to batch: {len(batch.non_tensor_batch['traj_uid'])}")
+        if "reward_scalar" in batch.non_tensor_batch:
+            reward_scalars = batch.non_tensor_batch.get("reward_scalar")
+            avg_reward = np.mean(reward_scalars).item()
+            print(f"[FullyAsyncTrainer] reward_scalar found with avg={avg_reward}")
         return 0, batch
 
     def _create_actor_rollout_classes(self):
@@ -260,15 +276,26 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                     if batch is None:
                         break
                     self._collect_metrics_from_samples(batch, metrics)
+                batch.meta_info["rollout_corr_config"] = self.config.algorithm.get("rollout_correction", None)
+                batch.meta_info["n_resp_per_rollout"] = self.config.actor_rollout_ref.rollout.n
+                if (
+                    self.config.actor_rollout_ref.actor.grad_baselining.enable
+                    and self.config.actor_rollout_ref.actor.update_policy_per_traj
+                ):
+                    # Keep same rollout group on same DP rank when OPOB baselining is enabled.
+                    batch.meta_info["dp_group_key"] = "uid"
+                    batch.meta_info["dp_group_size"] = self.config.actor_rollout_ref.rollout.n
                 batch, reward_extra_infos_dict = self._process_batch_common(
                     batch, metrics, timing_raw, self.local_trigger_step if self.compute_prox_log_prob else None
                 )
                 self._log_rollout(batch, reward_extra_infos_dict, timing_raw)
 
             self._collect_metrics(batch, 0, metrics, timing_raw)
-            self.metrics_aggregator.add_step_metrics(
-                metrics=metrics, sample_count=self.required_samples, timestamp=time.time()
+            structured_metrics = self.metrics_aggregator.add_step_metrics(
+                metrics=metrics, sample_count=self.required_samples, timestamp=time.time(), structured_metrics=self.structured_metrics
             )
+            if structured_metrics is not None:
+                self.structured_metrics = structured_metrics
             # Trigger parameter synchronization after training step
             time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             print(
@@ -278,7 +305,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                 f"{time_str}"
             )
             self._trigger_parameter_sync_after_step(global_steps=self.global_steps)
-            self._log_validation_data()
+            # [NOTE] Skip self._log_validation_data() already logged in _trigger_parameter_sync_after_step
             self._check_save_checkpoint(timing_raw)
             self.global_steps += 1
 
@@ -468,17 +495,26 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
             self.local_trigger_step += 1
             return
 
+        # Param Sync before validation
+        timing_param_sync = {}
+        with marked_timer("timing_s/wait_last_valid", timing_param_sync):
+            ray.get(self.param_synchronizer.wait_last_valid.remote())
+    
+        # [NOTE] Log validation data before incrementing step
+        self._log_validation_data()
+
         self.current_param_version += 1
         self.local_trigger_step = 1
+        step_data = self.metrics_aggregator.get_aggregated_metrics()
+        step_data.update(process_structured_metrics(self.structured_metrics, allow_media = True))
+        self.structured_metrics = defaultdict(list)
         self.logger.log(
-            data=self.metrics_aggregator.get_aggregated_metrics(),
+            data=step_data,
             step=self.current_param_version,
         )
         self.progress_bar.update(1)
         self.metrics_aggregator.reset()
-        timing_param_sync = {}
-        with marked_timer("timing_s/wait_last_valid", timing_param_sync):
-            ray.get(self.param_synchronizer.wait_last_valid.remote())
+        
         with marked_timer("timing_s/param_sync", timing_param_sync):
             ray.get(
                 self.param_synchronizer.sync_weights.remote(
@@ -491,15 +527,19 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         """
         Log validation data
         """
-        val_data = self.message_queue_client.get_validate_sync()
-        if not val_data:
-            return
+        
+        # [NOTE] Continue logging val_data until message queue client is empty
+        while True: 
+            val_data = self.message_queue_client.get_validate_sync()
+            if not val_data:
+                break
 
-        val_metrics: ValidateMetrics = ray.cloudpickle.loads(val_data)
-        if val_metrics.metrics:
-            self.logger.log(data=val_metrics.metrics, step=val_metrics.param_version)
-            pprint(
-                f"[FullyAsyncTrainer] parameter version: {val_metrics.param_version} "
-                f"Validation metrics: {val_metrics.metrics}"
-            )
-        self.logger.log(data=val_metrics.timing_raw, step=val_metrics.param_version)
+            val_metrics: ValidateMetrics = ray.cloudpickle.loads(val_data)
+            if val_metrics.metrics:
+                self.logger.log(data=val_metrics.metrics, step=val_metrics.param_version)
+                pprint(
+                    f"[FullyAsyncTrainer] parameter version: {self.current_param_version} val_metric step={val_metrics.param_version}\n"
+                    f"Validation metrics: {val_metrics.metrics}"
+
+                )
+            self.logger.log(data=val_metrics.timing_raw, step=val_metrics.param_version)

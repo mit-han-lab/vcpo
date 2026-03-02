@@ -965,8 +965,9 @@ def per_tensor_generator(
             cur_tensor, cur_name = None, None
 
         # pp broadcast model tensor and name
-        cur_name = broadcast_str_from_megatron_pp(cur_name)
-        broad_pp_tensor = broadcast_from_megatron_pp(cur_tensor)
+        with torch.no_grad():
+            cur_name = broadcast_str_from_megatron_pp(cur_name)
+            broad_pp_tensor = broadcast_from_megatron_pp(cur_tensor)
 
         # (xya): this is a hack to fix the name of the parameters
         while cur_name.startswith("module."):

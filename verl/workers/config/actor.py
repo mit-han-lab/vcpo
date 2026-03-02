@@ -25,7 +25,14 @@ from .engine import FSDPEngineConfig, McoreEngineConfig
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["PolicyLossConfig", "ActorConfig", "FSDPActorConfig", "McoreActorConfig"]
+__all__ = [
+    "PolicyLossConfig",
+    "ESSScalingConfig",
+    "GradBaselineConfig",
+    "ActorConfig",
+    "FSDPActorConfig",
+    "McoreActorConfig",
+]
 
 
 @dataclass
@@ -49,6 +56,25 @@ class PolicyLossConfig(BaseConfig):
     clip_cov_ub: float = 5.0
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
+
+
+@dataclass
+class ESSScalingConfig(BaseConfig):
+    enable: bool = False
+    scaling_rule: str = "sqrt"  # "sqrt" | "linear"
+    base_ess_ratio: float = 1.0  # base ess_ratio for scaling
+    use_clipped: bool = False  # use ess ratios derived from clipped is weights
+
+
+@dataclass
+class GradBaselineConfig(BaseConfig):
+    enable: bool = False
+    scope: str = "group"  # "group" | "minibatch"
+    agg_mode: str = "mean"  # "mean" | "median" | "winsorized_mean"
+    use_is_weights: bool = True
+    use_clipped_is_ratios: bool = False
+    normalize_by_length: bool = False
+    norm_by_std: bool = False
 
 
 @dataclass
@@ -84,6 +110,9 @@ class ActorConfig(BaseConfig):
         optim (OptimizerConfig): Configuration for optimizer.
         use_fused_kernels (bool): Whether to use custom fused kernels (e.g., FlashAttention, fused MLP).
         data_loader_seed (int): Seed for data loader. If None, uses global seed.
+        update_policy_per_traj (bool): Enable per-trajectory actor updates with exact grad stats.
+        ess_scaling (ESSScalingConfig): Configuration for ESS-based LR scaling.
+        grad_baselining (GradBaselineConfig): Configuration for VCPO gradient baselining.
     """
 
     _mutable_fields = BaseConfig._mutable_fields | {
@@ -127,6 +156,9 @@ class ActorConfig(BaseConfig):
     engine: BaseConfig = field(default_factory=BaseConfig)
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
+    update_policy_per_traj: bool = False
+    ess_scaling: ESSScalingConfig = field(default_factory=ESSScalingConfig)
+    grad_baselining: GradBaselineConfig = field(default_factory=GradBaselineConfig)
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size
