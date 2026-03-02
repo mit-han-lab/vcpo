@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import regex
 
 
 def resolve_config_path(config_path: str) -> str:
@@ -95,3 +96,47 @@ def add_generation_prompt_for_gpt_oss(message_content: str) -> str:
         Message content string with generation prompt
     """
     return message_content + "<|start|>assistant"
+
+
+def truncate_after_first_python_block(tokenizer, response_ids: list[int]) -> tuple[list[int], int]:
+    """Truncate `response_ids` after the first fenced python block.
+
+    This is useful for "Simple-TIR" style rollouts where the model may produce
+    additional text after emitting a python tool call.
+    """
+    try:
+        text = tokenizer.decode(response_ids, skip_special_tokens=False)
+    except Exception:
+        text = tokenizer.decode(response_ids)
+
+    # Find the first ```python ... ``` block (case-insensitive on language token).
+    m = regex.search(r"```[ \t]*(?i:python|py)[ \t]*\n.*?```", text, flags=regex.DOTALL)
+    if not m:
+        return response_ids, len(response_ids)
+
+    lo, hi = 0, len(response_ids)
+    while lo < hi: 
+        cutoff_len = (lo + hi) // 2
+
+        try:
+            text = tokenizer.decode(response_ids[:cutoff_len], skip_special_tokens=False)
+        except Exception:
+            text = tokenizer.decode(response_ids[:cutoff_len])
+
+        m = regex.search(r"```[ \t]*(?i:python|py)[ \t]*\n.*?```", text, flags=regex.DOTALL)
+        if not m:
+            lo = cutoff_len + 1
+        else:
+            hi = cutoff_len
+    cutoff_len = (lo + hi) // 2
+    return response_ids[:cutoff_len], cutoff_len
+    
+def format_simple_tir_tool_response_manually(tool_response: str) -> str:
+    """Format tool response for simple-tir behavior
+    Args:
+        tool_response: Tool response string
+
+    Returns:
+        Formatted tool response string
+    """
+    return f"\nCode execution result: \n{tool_response or 'No Result'}\n"

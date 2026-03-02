@@ -159,3 +159,45 @@ class GptOssToolParser(ToolParser):
         content = regex.sub(self.tool_call_pattern, "", text)
 
         return content, function_calls
+
+@ToolParser.register("simple-tir")
+class SimpleTIRToolParser(ToolParser):
+    """Tool parser for "Simple-TIR" style tool calls.
+
+    Expected format in model output:
+        ```python
+        <code here>
+        ```
+
+    Each fenced python block is converted into a `code_interpreter` tool call
+    with JSON arguments: {"code": "..."}.
+    """
+
+    def __init__(self, tokenizer) -> None:
+        super().__init__(tokenizer)
+
+        self.python_fence_regex = regex.compile(r"```(?:py|python)?\n(.*?)```", regex.DOTALL)
+
+    @rollout_trace_op
+    async def extract_tool_calls(self, responses_ids: list[int]) -> tuple[str, list[FunctionCall]]:
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, self.tokenizer.decode, responses_ids)
+
+        matches = self.python_fence_regex.findall(text)
+        if not matches:
+            return text, []
+
+        function_calls: list[FunctionCall] = []
+        for code in matches:
+            code = (code or "").strip()
+            if not code:
+                continue
+            function_calls.append(
+                FunctionCall(
+                    name="code_interpreter",
+                    arguments=json.dumps({"code": code}, ensure_ascii=False),
+                )
+            )
+
+        content = self.python_fence_regex.sub("", text).strip()
+        return content, function_calls

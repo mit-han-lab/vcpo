@@ -118,6 +118,8 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         agent_data.extra_fields["param_version_start"] = param_version
         agent_data.extra_fields["param_version_end"] = param_version
 
+        agent_data.extra_fields["validate"] = kwargs.get("validate", False)
+
         return agent_data
 
     def _restore_from_output(self, output: AgentLoopOutput) -> tuple[AgentData, AgentState]:
@@ -165,10 +167,12 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
         Handle GENERATING state, support partial rollout
         """
         add_messages: list[dict[str, Any]] = []
+        # Disable partial-generation path for validation.
+        validate = bool(agent_data.extra_fields.get("validate", False))
 
         with simple_timer("generate_sequences", agent_data.metrics):
             # partial interface
-            if self.enable_partial_rollout:
+            if self.enable_partial_rollout and not validate:
                 response_ids, log_probs, is_cancel = await self.server_manager.generate_for_partial(
                     request_id=agent_data.request_id,
                     prompt_ids=agent_data.prompt_ids,
@@ -179,8 +183,14 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
                 if is_cancel:
                     # Save the generated parts
                     agent_data.response_ids = response_ids
+                    # Truncate to first python-block if using Simple-TIR behavior
+                    if self.tool_parser_name == "simple-tir":
+                        from verl.experimental.agent_loop.utils import truncate_after_first_python_block
+                        agent_data.response_ids, cutoff_len = truncate_after_first_python_block(self.tokenizer, response_ids=agent_data.response_ids)
+                        if log_probs is not None:
+                            log_probs = log_probs[:cutoff_len]
                     agent_data.prompt_ids += agent_data.response_ids
-                    agent_data.response_mask += [1] * len(response_ids)
+                    agent_data.response_mask += [1] * len(agent_data.response_ids)
                     if log_probs:
                         agent_data.response_logprobs += log_probs
                     if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
@@ -202,6 +212,12 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = response_ids
+        # Truncate to first python-block if using Simple-TIR behavior
+        if self.tool_parser_name == "simple-tir":
+            from verl.experimental.agent_loop.utils import truncate_after_first_python_block
+            agent_data.response_ids, cutoff_len = truncate_after_first_python_block(self.tokenizer, response_ids=agent_data.response_ids)
+            if log_probs is not None:
+                log_probs = log_probs[:cutoff_len]
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         if log_probs:

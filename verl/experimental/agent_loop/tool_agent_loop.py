@@ -22,7 +22,7 @@ from uuid import uuid4
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput, register
 from verl.experimental.agent_loop.tool_parser import FunctionCall, ToolParser
-from verl.experimental.agent_loop.utils import add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually
+from verl.experimental.agent_loop.utils import add_generation_prompt_for_gpt_oss, format_gpt_oss_tool_response_manually, format_simple_tir_tool_response_manually
 from verl.interactions.base import BaseInteraction
 from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
 from verl.tools.schemas import ToolResponse
@@ -105,6 +105,8 @@ class ToolAgentLoop(AgentLoopBase):
         cls.tool_parser = ToolParser.get_tool_parser(config.actor_rollout_ref.rollout.multi_turn.format, cls.tokenizer)
         cls.tool_parser_name = config.actor_rollout_ref.rollout.multi_turn.format
         print(f"Initialized tools: {cls.tools}")
+        if cls.tool_parser_name == "simple-tir":
+            print(f"[ToolAgentLoop] Using simple-tir behavior")
 
         cls.apply_chat_template_kwargs = config.data.get("apply_chat_template_kwargs", {})
         cls.prompt_length = config.actor_rollout_ref.rollout.prompt_length
@@ -186,12 +188,16 @@ class ToolAgentLoop(AgentLoopBase):
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
         """Handle the pending state: prepare the prompt and start generation."""
+        if self.tool_parser_name == "simple-tir":
+            tool_schemas = None
+        else:
+            tool_schemas=self.tool_schemas
         if self.processor is not None:
             raw_prompt = await self.loop.run_in_executor(
                 None,
                 lambda: self.processor.apply_chat_template(
                     agent_data.messages,
-                    tools=self.tool_schemas,
+                    tools=tool_schemas,
                     add_generation_prompt=True,
                     tokenize=False,
                     **self.apply_chat_template_kwargs,
@@ -204,7 +210,7 @@ class ToolAgentLoop(AgentLoopBase):
                 None,
                 lambda: self.tokenizer.apply_chat_template(
                     agent_data.messages,
-                    tools=self.tool_schemas,
+                    tools=tool_schemas,
                     add_generation_prompt=True,
                     tokenize=True,
                     **self.apply_chat_template_kwargs,
@@ -228,11 +234,17 @@ class ToolAgentLoop(AgentLoopBase):
 
         agent_data.assistant_turns += 1
         agent_data.response_ids = output.token_ids
+        # Truncate to first python-block if using Simple-TIR behavior
+        if self.tool_parser_name == "simple-tir":
+            from .utils import truncate_after_first_python_block
+            agent_data.response_ids, cutoff_len = truncate_after_first_python_block(self.tokenizer, response_ids=agent_data.response_ids)
+            if output.log_probs is not None:
+                output.log_probs = output.log_probs[:cutoff_len]
         agent_data.prompt_ids += agent_data.response_ids
         agent_data.response_mask += [1] * len(agent_data.response_ids)
         if output.log_probs:
             agent_data.response_logprobs += output.log_probs
-
+        
         # Check termination conditions
         if not ignore_termination and len(agent_data.response_mask) >= self.response_length:
             return AgentState.TERMINATED
@@ -274,9 +286,10 @@ class ToolAgentLoop(AgentLoopBase):
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)
 
+        tool_metrics_combined = {}
         # Process tool responses and update multi_modal_data
         # Removed: agent_data.new_images_this_turn = []
-        for tool_response, tool_reward, _ in responses:
+        for tool_response, tool_reward, tool_metrics in responses:
             # Create message from tool response
             if tool_response.image or tool_response.video:
                 # Multi-modal content with structured format
@@ -324,9 +337,22 @@ class ToolAgentLoop(AgentLoopBase):
             if tool_reward is not None:
                 agent_data.tool_rewards.append(tool_reward)
 
-        agent_data.messages.extend(add_messages)
+        if self.tool_parser_name != "simple-tir":
+            agent_data.messages.extend(add_messages)
+
         # Update prompt with tool responses
-        if self.processor is not None:
+        if self.tool_parser_name == "simple-tir":
+            # Appending tool results to model output
+            logger.info("manually format tool responses for simple-tir")
+            tool_response_texts = []
+            for i, tool_msg in enumerate(add_messages):
+                formatted = format_simple_tir_tool_response_manually(tool_msg["content"])
+                tool_response_texts.append(formatted)
+            tool_response_text = "".join(tool_response_texts)
+            response_ids = await self.loop.run_in_executor(
+                None, lambda: self.tokenizer.encode(tool_response_text, add_special_tokens=False)
+            )
+        elif self.processor is not None:
             raw_tool_response = await self.loop.run_in_executor(
                 None,
                 lambda: self.processor.apply_chat_template(
